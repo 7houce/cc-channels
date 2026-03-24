@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+allowlist.json
+*.js.map
+*.tgz
+.turbo/
+.mcp.json
