@@ -34,7 +34,7 @@ Each channel package exposes a standalone entry point (`src/index.ts`) that can 
 ## Installation
 
 ```bash
-git clone https://github.com/tomzhou/cc-channels.git
+git clone https://github.com/7houce/cc-channels.git
 cd cc-channels
 pnpm install
 ```
@@ -208,7 +208,7 @@ pnpm monorepo，包含三个包：
 **安装：**
 
 ```bash
-git clone https://github.com/tomzhou/cc-channels.git
+git clone https://github.com/7houce/cc-channels.git
 cd cc-channels
 pnpm install
 ```
