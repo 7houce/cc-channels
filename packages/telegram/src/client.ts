@@ -1,4 +1,5 @@
 import { Bot, GrammyError } from 'grammy'
+import type { ReactionTypeEmoji } from 'grammy/types'
 import { logger } from '@cc-channels/core'
 import type { ChannelClient } from '@cc-channels/core'
 
@@ -29,7 +30,9 @@ export class TelegramClient implements ChannelClient {
     await this.throttle()
     try {
       await this.bot.api.setMessageReaction(Number(chatId), Number(messageId),
-        emojis.map(emoji => ({ type: 'emoji', emoji }) as any)
+        // `emoji` is an arbitrary string; Telegram only accepts a fixed set,
+        // so assert the precise reaction type rather than `as any`.
+        emojis.map(emoji => ({ type: 'emoji', emoji }) as ReactionTypeEmoji)
       )
     } catch (err) {
       // Non-whitelisted emoji silently fails

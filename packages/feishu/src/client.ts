@@ -29,7 +29,7 @@ export class FeishuClient implements ChannelClient {
         },
       })
     )
-    return (res as any)?.data?.message_id || ''
+    return res?.data?.message_id || ''
   }
 
   async sendImage(chatId: string, filePath: string, caption?: string): Promise<string> {
@@ -48,7 +48,7 @@ export class FeishuClient implements ChannelClient {
         content: JSON.stringify({ image_key: imageKey }),
       },
     })
-    return (res as any)?.data?.message_id || ''
+    return res?.data?.message_id || ''
   }
 
   async addReaction(chatId: string, messageId: string | number, emoji: string): Promise<void> {

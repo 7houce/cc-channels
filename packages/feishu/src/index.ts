@@ -10,7 +10,9 @@ import {
   Allowlist,
   AttachmentHandler,
   McpChannelServer,
+  MessagePipeline,
 } from '@cc-channels/core'
+import type { PreparedPayload } from '@cc-channels/core'
 import { join } from 'node:path'
 
 // --- Config ---
@@ -33,6 +35,23 @@ const toolProvider = new FeishuToolProvider(client, allowlist)
 const mcp = new McpChannelServer(client, toolProvider)
 toolProvider.setMcpServer(mcp)
 
+// Shared inbound-message processor; only the Feishu-specific strings live here.
+const pipeline = new MessagePipeline(
+  { client, allowlist, queue, mcp },
+  {
+    pairPrefix: 'pair ',
+    newCodeCommand: 'newcode',
+    ackReaction: 'THUMBSUP',
+    texts: {
+      pairSuccess: 'Paired successfully ✅',
+      pairInvalid: 'Invalid or expired pairing code',
+      newCode: (code) => `New pairing code: ${code}\nExpires in 5 minutes. Send "pair ${code}" to pair.`,
+      queueFull: 'Queue full, please try again later',
+      deliveryFailed: 'Message delivery failed, please retry',
+    },
+  }
+)
+
 // --- Pairing code on startup ---
 const GENERATE_PAIR_CODE = process.env.GENERATE_PAIR_CODE === 'true'
 if (!allowlist.hasAnyUsers() || GENERATE_PAIR_CODE) {
@@ -47,112 +66,41 @@ async function handleMessage(
 ): Promise<void> {
   const text = extractTextContent(messageType, rawContent)
 
-  // Pair command
-  if (text.startsWith('pair ')) {
-    const code = text.slice(5).trim()
-    if (allowlist.validatePairingCode(code)) {
-      allowlist.addUser(senderId, senderName)
-      await client.sendMessage(chatId, 'Paired successfully \u2705')
-    } else {
-      await client.sendMessage(chatId, 'Invalid or expired pairing code')
-    }
-    return
-  }
-
-  if (text === 'newcode') {
-    if (!allowlist.isAllowed(senderId)) return
-    const code = allowlist.generatePairingCode()
-    await client.sendMessage(chatId, `New pairing code: ${code}\nExpires in 5 minutes. Send "pair ${code}" to pair.`)
-    return
-  }
-
-  // Allowlist check
-  if (!allowlist.isAllowed(senderId)) return
-
-  // Set permission chat
-  mcp.setPermissionChatId(chatId)
-
-  // Permission reply check
-  if (mcp.isPermissionReply(text)) {
-    await mcp.handlePermissionReply(text)
-    return
-  }
-
-  // React "working on it"
-  await client.addReaction(chatId, messageId, 'THUMBSUP')
-  mcp.trackInboundMessage(chatId, messageId)
-
-  // Unsupported media
-  const unsupported = getUnsupportedType(messageType)
-  let content = text
-  if (unsupported) {
-    content = content ? `${content}\n(unsupported attachment: ${unsupported})` : `(unsupported attachment: ${unsupported})`
-  }
-
-  // Extract attachments
-  const rawAttachments = extractAttachments(messageType, rawContent)
-  const meta: Record<string, string> = {
-    chat_id: chatId,
-    sender: senderName,
-    message_id: messageId,
-  }
-
-  for (const att of rawAttachments) {
-    const localPath = await attachments.download(att, messageId)
-    if (localPath) {
-      att.localPath = localPath
-      meta[att.type === 'photo' ? 'image_path' : 'file_path'] = localPath
-      meta[att.type === 'photo' ? 'has_image' : 'has_file'] = 'true'
-    }
-  }
-
-  if (!content && rawAttachments.length === 0) return
-
-  // Enqueue
-  const queued = queue.enqueue({
+  await pipeline.handle({
     chatId,
-    content: content || '(attachment)',
     senderId,
+    senderName,
     messageId,
-    attachments: rawAttachments.length > 0 ? rawAttachments : undefined,
+    text,
+    // Feishu-specific: download attachments and build the delivery payload.
+    prepare: async (): Promise<PreparedPayload> => {
+      // Unsupported media
+      const unsupported = getUnsupportedType(messageType)
+      let content = text
+      if (unsupported) {
+        content = content ? `${content}\n(unsupported attachment: ${unsupported})` : `(unsupported attachment: ${unsupported})`
+      }
+
+      // Extract attachments
+      const rawAttachments = extractAttachments(messageType, rawContent)
+      const meta: Record<string, string> = {
+        chat_id: chatId,
+        sender: senderName,
+        message_id: messageId,
+      }
+
+      for (const att of rawAttachments) {
+        const localPath = await attachments.download(att, messageId)
+        if (localPath) {
+          att.localPath = localPath
+          meta[att.type === 'photo' ? 'image_path' : 'file_path'] = localPath
+          meta[att.type === 'photo' ? 'has_image' : 'has_file'] = 'true'
+        }
+      }
+
+      return { content, attachments: rawAttachments, meta }
+    },
   })
-
-  if (!queued) {
-    await client.sendMessage(chatId, 'Queue full, please try again later')
-    return
-  }
-
-  // Deliver via MCP
-  try {
-    await mcp.sendNotification(queued.content, meta)
-    queue.markDelivered(queued.id)
-  } catch (err) {
-    logger.error(`Failed to deliver message ${queued.id}: ${err}`)
-    retryDelivery(queued.id, meta)
-  }
-}
-
-function retryDelivery(queueId: string, meta: Record<string, string>): void {
-  const msg = queue.get(queueId)
-  if (!msg || msg.status === 'failed') return
-
-  queue.markRetry(queueId)
-  const updatedMsg = queue.get(queueId)
-  if (!updatedMsg || updatedMsg.status === 'failed') {
-    void client.sendMessage(msg.chatId, 'Message delivery failed, please retry')
-    return
-  }
-
-  const delay = queue.getRetryDelay(queueId)
-  setTimeout(async () => {
-    try {
-      await mcp.sendNotification(updatedMsg.content, meta)
-      queue.markDelivered(queueId)
-    } catch (err) {
-      logger.error(`Retry failed for ${queueId}: ${err}`)
-      retryDelivery(queueId, meta)
-    }
-  }, delay)
 }
 
 // --- Dedup ---

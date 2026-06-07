@@ -4,11 +4,27 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
+import type { Request, Result, CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import type { ChannelClient, ChannelToolProvider } from './interfaces.js'
 import { logger } from './logger.js'
 
 export const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
+
+/**
+ * Custom (experimental) notifications this server emits. Declaring them lets
+ * {@link Server.notification} type-check these methods instead of needing an
+ * `as any` escape hatch.
+ */
+type ChannelNotification =
+  | {
+      method: 'notifications/claude/channel'
+      params: { content: string; meta: Record<string, string> }
+    }
+  | {
+      method: 'notifications/claude/channel/permission'
+      params: { request_id: string; behavior: 'allow' | 'deny' }
+    }
 
 const PermissionRequestSchema = z.object({
   method: z.literal('notifications/claude/channel/permission_request'),
@@ -21,7 +37,7 @@ const PermissionRequestSchema = z.object({
 })
 
 export class McpChannelServer {
-  private server: Server
+  private server: Server<Request, ChannelNotification, Result>
   private client: ChannelClient
   private toolProvider: ChannelToolProvider
   private permissionChatId: string | null = null
@@ -31,7 +47,7 @@ export class McpChannelServer {
     this.client = client
     this.toolProvider = toolProvider
 
-    this.server = new Server(
+    this.server = new Server<Request, ChannelNotification, Result>(
       { name: toolProvider.channelName, version: '0.1.0' },
       {
         capabilities: {
@@ -56,7 +72,7 @@ export class McpChannelServer {
   }
 
   async sendNotification(content: string, meta: Record<string, string>): Promise<void> {
-    await (this.server as any).notification({
+    await this.server.notification({
       method: 'notifications/claude/channel',
       params: { content, meta },
     })
@@ -71,7 +87,7 @@ export class McpChannelServer {
     if (!match) return
     const [, verdict, requestId] = match
     const behavior = verdict.toLowerCase().startsWith('y') ? 'allow' : 'deny'
-    await (this.server as any).notification({
+    await this.server.notification({
       method: 'notifications/claude/channel/permission',
       params: { request_id: requestId.toLowerCase(), behavior },
     })
@@ -98,7 +114,10 @@ export class McpChannelServer {
     this.server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const { name, arguments: args } = req.params
       try {
-        return await this.toolProvider.handleToolCall(name, (args || {}) as Record<string, unknown>) as any
+        // ToolResult is structurally a CallToolResult minus the SDK's open
+        // index signature; assert the precise type instead of `as any`.
+        const result = await this.toolProvider.handleToolCall(name, (args || {}) as Record<string, unknown>)
+        return result as CallToolResult
       } catch (err) {
         logger.error(`Tool ${name} failed: ${err}`)
         return {

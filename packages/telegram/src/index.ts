@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import 'dotenv/config'
-import { logger, MessageQueue, Allowlist, AttachmentHandler, McpChannelServer } from '@cc-channels/core'
-import type { Attachment } from '@cc-channels/core'
+import { logger, MessageQueue, Allowlist, AttachmentHandler, McpChannelServer, MessagePipeline } from '@cc-channels/core'
+import type { PreparedPayload } from '@cc-channels/core'
 import { TelegramClient } from './client.js'
 import { TelegramToolProvider } from './tools.js'
 import { getUnsupportedType, extractAttachments } from './helpers.js'
@@ -30,6 +30,23 @@ toolProvider.setMcpServer(mcp)
 
 const attachments = new AttachmentHandler(client, '/tmp/claude-channel-telegram')
 
+// Shared inbound-message processor; only the Telegram-specific strings live here.
+const pipeline = new MessagePipeline(
+  { client, allowlist, queue, mcp },
+  {
+    pairPrefix: '/pair ',
+    newCodeCommand: '/newcode',
+    ackReaction: '👨‍💻',
+    texts: {
+      pairSuccess: '配对成功 ✅',
+      pairInvalid: '配对码无效或已过期',
+      newCode: (code) => `新配对码: ${code}\n5 分钟内有效，发送 /pair ${code} 完成配对`,
+      queueFull: '队列已满，请稍后再试',
+      deliveryFailed: '消息投递失败，请重试',
+    },
+  }
+)
+
 // --- Pairing code on startup ---
 const GENERATE_PAIR_CODE = process.env.GENERATE_PAIR_CODE === 'true'
 if (!allowlist.hasAnyUsers() || GENERATE_PAIR_CODE) {
@@ -39,125 +56,48 @@ if (!allowlist.hasAnyUsers() || GENERATE_PAIR_CODE) {
 
 // --- Process inbound message ---
 async function handleMessage(chatId: string, senderId: string, senderName: string, messageId: number, text: string, rawMsg: any): Promise<void> {
-  // Commands: /pair and /newcode bypass allowlist
-  if (text.startsWith('/pair ')) {
-    const code = text.slice(6).trim()
-    if (allowlist.validatePairingCode(code)) {
-      allowlist.addUser(senderId, senderName)
-      await client.sendMessage(chatId, '配对成功 ✅')
-    } else {
-      await client.sendMessage(chatId, '配对码无效或已过期')
-    }
-    return
-  }
-
-  if (text === '/newcode') {
-    if (!allowlist.isAllowed(senderId)) {
-      return // silently drop
-    }
-    const code = allowlist.generatePairingCode()
-    await client.sendMessage(chatId, `新配对码: ${code}\n5 分钟内有效，发送 /pair ${code} 完成配对`)
-    return
-  }
-
-  // Allowlist check
-  if (!allowlist.isAllowed(senderId)) {
-    return // silently drop
-  }
-
-  // Set permission chat ID to the first allowed user's chat
-  mcp.setPermissionChatId(chatId)
-
-  // Check for permission reply
-  if (mcp.isPermissionReply(text)) {
-    await mcp.handlePermissionReply(text)
-    return
-  }
-
-  // React 👨‍💻 and track message for auto 💯
-  await client.addReaction(chatId, messageId, '👨‍💻')
-  mcp.trackInboundMessage(chatId, messageId)
-
-  // Check unsupported media
-  const unsupported = getUnsupportedType(rawMsg)
-  let content = text || ''
-  if (unsupported) {
-    content = content ? `${content}\n（不支持的附件类型: ${unsupported}）` : `（不支持的附件类型: ${unsupported}）`
-  }
-
-  // Extract and download attachments
-  const rawAttachments = extractAttachments(rawMsg)
-  const meta: Record<string, string> = {
-    chat_id: chatId,
-    sender: senderName,
-    message_id: String(messageId),
-  }
-
-  for (const att of rawAttachments) {
-    const localPath = await attachments.download(att, String(messageId))
-    if (localPath) {
-      att.localPath = localPath
-      if (att.type === 'photo') {
-        meta.has_image = 'true'
-        meta.image_path = localPath
-      } else {
-        meta.has_file = 'true'
-        meta.file_path = localPath
-      }
-    } else if (att.fileSize && att.fileSize > 20 * 1024 * 1024) {
-      content += '\n（附件过大，无法下载）'
-    }
-  }
-
-  if (!content && rawAttachments.length === 0) {
-    return // empty message, skip
-  }
-
-  // Enqueue
-  const queued = queue.enqueue({
+  await pipeline.handle({
     chatId,
-    content: content || '(attachment)',
     senderId,
+    senderName,
     messageId: String(messageId),
-    attachments: rawAttachments.length > 0 ? rawAttachments : undefined,
+    text,
+    // Telegram-specific: download attachments and build the delivery payload.
+    prepare: async (): Promise<PreparedPayload> => {
+      // Check unsupported media
+      const unsupported = getUnsupportedType(rawMsg)
+      let content = text || ''
+      if (unsupported) {
+        content = content ? `${content}\n（不支持的附件类型: ${unsupported}）` : `（不支持的附件类型: ${unsupported}）`
+      }
+
+      // Extract and download attachments
+      const rawAttachments = extractAttachments(rawMsg)
+      const meta: Record<string, string> = {
+        chat_id: chatId,
+        sender: senderName,
+        message_id: String(messageId),
+      }
+
+      for (const att of rawAttachments) {
+        const localPath = await attachments.download(att, String(messageId))
+        if (localPath) {
+          att.localPath = localPath
+          if (att.type === 'photo') {
+            meta.has_image = 'true'
+            meta.image_path = localPath
+          } else {
+            meta.has_file = 'true'
+            meta.file_path = localPath
+          }
+        } else if (att.fileSize && att.fileSize > 20 * 1024 * 1024) {
+          content += '\n（附件过大，无法下载）'
+        }
+      }
+
+      return { content, attachments: rawAttachments, meta }
+    },
   })
-
-  if (!queued) {
-    await client.sendMessage(chatId, '队列已满，请稍后再试')
-    return
-  }
-
-  // Deliver via MCP notification
-  try {
-    await mcp.sendNotification(queued.content, meta)
-    queue.markDelivered(queued.id)
-  } catch (err) {
-    logger.error(`Failed to deliver message ${queued.id}: ${err}`)
-    await retryDelivery(queued.id, meta)
-  }
-}
-
-async function retryDelivery(queueId: string, meta: Record<string, string>): Promise<void> {
-  const msg = queue.get(queueId)
-  if (!msg || msg.status === 'failed') return
-
-  queue.markRetry(queueId)
-  const updatedMsg = queue.get(queueId)
-  if (!updatedMsg || updatedMsg.status === 'failed') {
-    await client.sendMessage(msg.chatId, '消息投递失败，请重试')
-    return
-  }
-
-  const delay = queue.getRetryDelay(queueId)
-  setTimeout(async () => {
-    try {
-      await mcp.sendNotification(updatedMsg.content, meta)
-      queue.markDelivered(queueId)
-    } catch (err) {
-      logger.error(`Retry failed for ${queueId}: ${err}`)
-      await retryDelivery(queueId, meta)
-    }
-  }, delay)
 }
 
 // --- Set up Telegram bot handlers ---
