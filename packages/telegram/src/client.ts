@@ -56,6 +56,20 @@ export class TelegramClient implements ChannelClient {
     return result.message_id
   }
 
+  // Send any local file as a Telegram document (PDF, zip, etc.). Unlike sendImage
+  // (sendPhoto, image-only), this preserves the original filename. Passing the path
+  // string to InputFile lets grammY derive the displayed filename from its basename.
+  async sendDocument(chatId: string, filePath: string, caption?: string): Promise<number> {
+    await this.throttle()
+    const { InputFile } = await import('grammy')
+    const result = await this.withRetry(() =>
+      this.bot.api.sendDocument(Number(chatId), new InputFile(filePath), {
+        caption,
+      })
+    )
+    return result.message_id
+  }
+
   async getFileUrl(fileId: string): Promise<string> {
     const file = await this.bot.api.getFile(fileId)
     return `https://api.telegram.org/file/bot${this.bot.token}/${file.file_path}`

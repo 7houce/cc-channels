@@ -11,6 +11,7 @@ export class TelegramToolProvider implements ChannelToolProvider {
     'Use the reply tool to respond. Always include chat_id and message_id from the notification meta.',
     'The bot automatically adds 👨‍💻 when receiving and 👍 when you reply.',
     'For images, use send_image tool with a local file path.',
+    'For non-image files (PDF, zip, any document), use send_document tool with a local file path.',
     'Permission approval requests are relayed through Telegram.',
   ].join(' ')
 
@@ -73,6 +74,19 @@ export class TelegramToolProvider implements ChannelToolProvider {
         },
       },
       {
+        name: 'send_document',
+        description: 'Send a local file (PDF, zip, or any document) to a Telegram chat. Use this for non-image files; the original filename is preserved.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            chat_id: { type: 'string', description: 'Telegram chat ID' },
+            file_path: { type: 'string', description: 'Local file path to the document' },
+            caption: { type: 'string', description: 'Optional caption' },
+          },
+          required: ['chat_id', 'file_path'],
+        },
+      },
+      {
         name: 'generate_pair_code',
         description: 'Generate a new 6-character pairing code for Telegram user registration. The code expires in 5 minutes. Tell the user to send /pair <code> in Telegram.',
         inputSchema: {
@@ -113,6 +127,13 @@ export class TelegramToolProvider implements ChannelToolProvider {
         const caption = args.caption as string | undefined
         await this.client.sendImage(chatId, imagePath, caption)
         return { content: [{ type: 'text' as const, text: 'image sent' }] }
+      }
+      case 'send_document': {
+        const chatId = args.chat_id as string
+        const filePath = args.file_path as string
+        const caption = args.caption as string | undefined
+        await this.client.sendDocument(chatId, filePath, caption)
+        return { content: [{ type: 'text' as const, text: 'document sent' }] }
       }
       case 'generate_pair_code': {
         const code = this.allowlist.generatePairingCode()
